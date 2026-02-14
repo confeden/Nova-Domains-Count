@@ -1,0 +1,58 @@
+/* d:\Desktop\Scripts\Chrome\domain-analyzer\src\index.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+img {
+    border-radius: 50%;
+}
+
+html {
+    width: 350px;
+    height: 500px;
+    overflow: hidden;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow-x: hidden;
+}
+
+html,
+body {
+    background-color: #f9fafb;
+    /* Light mode */
+}
+
+html.dark,
+html.dark body {
+    background-color: #111827;
+    /* Dark mode (gray-900) */
+}
+
+#root {
+    height: 100%;
+}
+
+/* Стилизация скроллбара: убираем "прозрачную полоску" и делаем его аккуратным */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background-color: #cbd5e1;
+    border-radius: 3px;
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+    background-color: #475569;
+    /* gray-600 */
+}
