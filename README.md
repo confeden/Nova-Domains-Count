@@ -1,8 +1,9 @@
 # Nova Domains Count
 
+**Nova Domains Count** — это бесплатное расширение для Chromium-браузеров (Chrome, Edge, Brave и др.) с открытым исходным кодом, предназначенное для мониторинга сетевой активности на веб-страницах.
+
 <img src="https://github.com/user-attachments/assets/68a16756-cd5b-42f3-ae5c-6937e2a3c7ed" width="256" />
 
-**Nova Domains Count** — это бесплатное расширение для Chromium-браузеров (Chrome, Edge, Brave и др.) с открытым исходным кодом, предназначенное для мониторинга сетевой активности на веб-страницах.
 
 
 <img width="905" height="645" alt="image" src="https://github.com/user-attachments/assets/b5e19d27-0ad4-46e6-8471-9d704510c3cd" />
