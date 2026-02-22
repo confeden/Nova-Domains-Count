@@ -25,4 +25,6 @@ dist-ssr
 
 # Project specific
 Nova_Domains_Count.zip
+Nova_Domains_Count_v1.0.0.zip
 domain-analyzer/
+*.code-workspace

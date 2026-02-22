@@ -1,11 +1,35 @@
-import { useEffect, useState, useMemo } from 'react';
-import { getRootDomain } from './utils/domainParser';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+    POPUP_PORT_NAME,
+    SUBSCRIBE_TAB_MESSAGE_TYPE,
+    TAB_DOMAINS_UPDATE_MESSAGE_TYPE,
+    type DomainEntry,
+    type SubscribeTabMessage,
+    type TabDomainsUpdateMessage
+} from './shared/messages';
+
+const COPY_DEFAULT_LABEL = 'Copy all domains';
+const COPY_SUCCESS_LABEL = 'Copied!';
+const COPY_ERROR_LABEL = 'Copy failed';
+const COPY_RESET_TIMEOUT_MS = 2000;
+const LOADING_FALLBACK_MS = 1200;
+
+function mapsAreEqual(left: Map<string, number>, right: Map<string, number>): boolean {
+    if (left.size !== right.size) return false;
+
+    for (const [domain, count] of left.entries()) {
+        if (right.get(domain) !== count) return false;
+    }
+
+    return true;
+}
 
 function App() {
     const [domainMap, setDomainMap] = useState<Map<string, number>>(new Map());
     const [loading, setLoading] = useState(true);
-    const [copyStatus, setCopyStatus] = useState("Copy all domains");
+    const [copyStatus, setCopyStatus] = useState(COPY_DEFAULT_LABEL);
     const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
+    const copyResetTimerRef = useRef<number | null>(null);
 
     useEffect(() => {
         if (isDarkMode) {
@@ -23,119 +47,152 @@ function App() {
 
     const domains = useMemo(() => {
         return Array.from(domainMap.entries())
+            .sort((left, right) => {
+                const countDiff = right[1] - left[1];
+                if (countDiff !== 0) return countDiff;
+                return left[0].localeCompare(right[0]);
+            })
             .map(([domain, count]) => ({ domain, count }));
     }, [domainMap]);
 
-    const processUrls = (urls: string[]) => {
-        const newMap = new Map<string, number>();
-        urls.forEach(url => {
-            if (!url.startsWith('http')) return;
-            const rootDomain = getRootDomain(url);
-            newMap.set(rootDomain, (newMap.get(rootDomain) || 0) + 1);
+    const applyDomainSnapshot = (domainEntries: DomainEntry[]) => {
+        const nextMap = new Map<string, number>();
+
+        domainEntries.forEach((entry) => {
+            if (!entry?.domain || entry.domain === 'unknown') return;
+            nextMap.set(entry.domain, entry.count);
         });
 
-        setDomainMap(newMap);
+        setDomainMap((currentMap) => mapsAreEqual(currentMap, nextMap) ? currentMap : nextMap);
         setLoading(false);
     };
 
     useEffect(() => {
         let port: chrome.runtime.Port | null = null;
-        let timeoutId: number | null = null;
+        let activeTabId: number | null = null;
+        let loadingFallbackTimer: number | null = null;
 
-        const connectToTab = (retries = 10) => {
+        const clearLoadingFallback = () => {
+            if (loadingFallbackTimer !== null) {
+                clearTimeout(loadingFallbackTimer);
+                loadingFallbackTimer = null;
+            }
+        };
+
+        const disconnectPort = () => {
+            if (!port) return;
+            port.disconnect();
+            port = null;
+        };
+
+        const startLoadingWithFallback = () => {
+            setLoading(true);
+            clearLoadingFallback();
+            loadingFallbackTimer = window.setTimeout(() => {
+                setLoading(false);
+            }, LOADING_FALLBACK_MS);
+        };
+
+        const resetDomains = () => {
+            setDomainMap(new Map());
+        };
+
+        const subscribeToTab = (tabId: number) => {
+            disconnectPort();
+
+            port = chrome.runtime.connect({ name: POPUP_PORT_NAME });
+
+            port.onMessage.addListener((rawMessage: unknown) => {
+                if (!rawMessage || typeof rawMessage !== 'object') return;
+
+                const message = rawMessage as Partial<TabDomainsUpdateMessage>;
+                if (message.type !== TAB_DOMAINS_UPDATE_MESSAGE_TYPE) return;
+                if (message.tabId !== tabId) return;
+
+                const domains = Array.isArray(message.domains) ? message.domains : [];
+                applyDomainSnapshot(domains);
+            });
+
+            port.onDisconnect.addListener(() => {
+                port = null;
+            });
+
+            const subscribeMessage: SubscribeTabMessage = {
+                type: SUBSCRIBE_TAB_MESSAGE_TYPE,
+                tabId
+            };
+            port.postMessage(subscribeMessage);
+            startLoadingWithFallback();
+        };
+
+        const connectToActiveTab = () => {
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                 const activeTab = tabs[0];
+                const tabId = activeTab?.id;
 
-                if (!activeTab?.url?.startsWith('http')) {
+                if (typeof tabId !== 'number' || !activeTab?.url?.startsWith('http')) {
+                    activeTabId = null;
+                    resetDomains();
                     setLoading(false);
+                    disconnectPort();
                     return;
                 }
 
-                if (activeTab?.id) {
-                    // Проверяем, жив ли контент-скрипт, прежде чем подключаться
-                    chrome.tabs.sendMessage(activeTab.id, { type: "PING" }, () => {
-                        const lastError = chrome.runtime.lastError;
-
-                        if (lastError) {
-                            if (retries > 0) {
-                                timeoutId = window.setTimeout(() => connectToTab(retries - 1), 500);
-                            } else {
-                                setLoading(false);
-                            }
-                            return;
-                        }
-
-                        try {
-                            if (port) {
-                                try { port.disconnect(); } catch (e) { }
-                            }
-
-                            port = chrome.tabs.connect(activeTab.id!, { name: "domain-analyzer" });
-                            let hasReceivedData = false;
-
-                            port.onMessage.addListener((response: { urls: string[] }) => {
-                                hasReceivedData = true;
-                                if (response && response.urls) {
-                                    processUrls(response.urls);
-                                }
-                            });
-
-                            port.onDisconnect.addListener(() => {
-                                // Если порт закрылся, но мы еще не получили данных, возможно страница перезагружается
-                                if (!hasReceivedData && retries > 0) {
-                                    setTimeout(() => connectToTab(retries - 1), 250);
-                                }
-                            });
-
-                        } catch (e) {
-                            if (retries > 0) {
-                                setTimeout(() => connectToTab(retries - 1), 250);
-                            } else {
-                                setLoading(false);
-                            }
-                        }
-                    });
-                } else {
-                    setLoading(false);
-                }
+                activeTabId = tabId;
+                resetDomains();
+                subscribeToTab(tabId);
             });
         };
 
-        // Первое подключение
-        connectToTab();
-
-        const handleTabUpdate = (tabId: number, changeInfo: any) => {
-            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                if (tabs[0]?.id === tabId) {
-                    if (changeInfo.status === 'loading') {
-                        setDomainMap(new Map());
-                        setLoading(true);
-                        // Очистка порта при начале загрузки
-                        if (port) {
-                            try { port.disconnect(); } catch (e) { }
-                            port = null;
-                        }
-                        connectToTab(15); // Более агрессивные попытки при перезагрузке
-                    }
-                }
-            });
+        const handleTabActivated = () => {
+            connectToActiveTab();
         };
 
+        const handleTabUpdate = (tabId: number, changeInfo: { status?: string }) => {
+            if (tabId === activeTabId && changeInfo.status === 'loading') {
+                resetDomains();
+                startLoadingWithFallback();
+            }
+        };
+
+        connectToActiveTab();
+
+        chrome.tabs.onActivated.addListener(handleTabActivated);
         chrome.tabs.onUpdated.addListener(handleTabUpdate);
 
         return () => {
-            port?.disconnect();
-            if (timeoutId) clearTimeout(timeoutId);
+            clearLoadingFallback();
+            disconnectPort();
+            chrome.tabs.onActivated.removeListener(handleTabActivated);
             chrome.tabs.onUpdated.removeListener(handleTabUpdate);
         };
     }, []);
 
+    useEffect(() => {
+        return () => {
+            if (copyResetTimerRef.current !== null) {
+                clearTimeout(copyResetTimerRef.current);
+            }
+        };
+    }, []);
+
+    const setCopyStatusWithAutoReset = (status: string) => {
+        setCopyStatus(status);
+
+        if (copyResetTimerRef.current !== null) {
+            clearTimeout(copyResetTimerRef.current);
+        }
+
+        copyResetTimerRef.current = window.setTimeout(() => {
+            setCopyStatus(COPY_DEFAULT_LABEL);
+        }, COPY_RESET_TIMEOUT_MS);
+    };
+
     const handleCopy = () => {
         const textToCopy = domains.map(d => d.domain).join('\n');
-        navigator.clipboard.writeText(textToCopy).then(() => {
-            setCopyStatus("Copied!");
-            setTimeout(() => setCopyStatus("Copy all domains"), 2000);
-        });
+        navigator.clipboard.writeText(textToCopy)
+            .then(() => setCopyStatusWithAutoReset(COPY_SUCCESS_LABEL))
+            .catch(() => setCopyStatusWithAutoReset(COPY_ERROR_LABEL));
     };
 
     const copySingleDomain = (domain: string) => {
@@ -223,7 +280,7 @@ function App() {
                 <button
                     onClick={handleCopy}
                     className={`flex-1 py-2 px-4 rounded-lg text-sm font-semibold 
-                ${copyStatus === "Copied!"
+                ${copyStatus === COPY_SUCCESS_LABEL
                             ? "bg-green-500 text-white"
                             : "bg-indigo-600 dark:bg-indigo-700 text-white hover:bg-indigo-700 dark:hover:bg-indigo-600 active:scale-95"
                         }`}

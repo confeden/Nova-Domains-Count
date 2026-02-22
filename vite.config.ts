@@ -8,7 +8,7 @@ import { crx, defineManifest } from '@crxjs/vite-plugin'
 const manifest = defineManifest({
     manifest_version: 3,
     name: "Nova Domains Count",
-    version: "1.0.0",
+    version: "1.1.0",
     action: {
         default_popup: "index.html",
         default_icon: "icon.png"
@@ -18,20 +18,12 @@ const manifest = defineManifest({
         "48": "icon.png",
         "128": "icon.png"
     },
-    permissions: ["activeTab", "scripting", "tabs"],
-    content_scripts: [
-        {
-            matches: ["<all_urls>"],
-            js: ["src/content.ts"],
-            run_at: "document_start"
-        },
-        {
-            matches: ["<all_urls>"],
-            js: ["src/inject.ts"],
-            world: "MAIN",
-            run_at: "document_start"
-        }
-    ]
+    permissions: ["activeTab", "tabs", "webRequest"],
+    host_permissions: ["<all_urls>"],
+    background: {
+        service_worker: "src/background.ts",
+        type: "module"
+    }
 })
 
 export default defineConfig({
