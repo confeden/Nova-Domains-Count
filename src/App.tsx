@@ -14,18 +14,21 @@ const COPY_ERROR_LABEL = 'Copy failed';
 const COPY_RESET_TIMEOUT_MS = 2000;
 const LOADING_FALLBACK_MS = 1200;
 
-function mapsAreEqual(left: Map<string, number>, right: Map<string, number>): boolean {
+function mapsAreEqual(left: Map<string, { count: number; active?: boolean }>, right: Map<string, { count: number; active?: boolean }>): boolean {
     if (left.size !== right.size) return false;
 
-    for (const [domain, count] of left.entries()) {
-        if (right.get(domain) !== count) return false;
+    for (const [domain, val] of left.entries()) {
+        const rightVal = right.get(domain);
+        if (!rightVal) return false;
+        if (rightVal.count !== val.count) return false;
+        if (!!rightVal.active !== !!val.active) return false;
     }
 
     return true;
 }
 
 function App() {
-    const [domainMap, setDomainMap] = useState<Map<string, number>>(new Map());
+    const [domainMap, setDomainMap] = useState<Map<string, { count: number; active?: boolean }>>(new Map());
     const [loading, setLoading] = useState(true);
     const [copyStatus, setCopyStatus] = useState(COPY_DEFAULT_LABEL);
     const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
@@ -48,19 +51,19 @@ function App() {
     const domains = useMemo(() => {
         return Array.from(domainMap.entries())
             .sort((left, right) => {
-                const countDiff = right[1] - left[1];
+                const countDiff = right[1].count - left[1].count;
                 if (countDiff !== 0) return countDiff;
                 return left[0].localeCompare(right[0]);
             })
-            .map(([domain, count]) => ({ domain, count }));
+            .map(([domain, val]) => ({ domain, count: val.count, active: val.active }));
     }, [domainMap]);
 
     const applyDomainSnapshot = (domainEntries: DomainEntry[]) => {
-        const nextMap = new Map<string, number>();
+        const nextMap = new Map<string, { count: number; active?: boolean }>();
 
         domainEntries.forEach((entry) => {
             if (!entry?.domain || entry.domain === 'unknown') return;
-            nextMap.set(entry.domain, entry.count);
+            nextMap.set(entry.domain, { count: entry.count, active: entry.active });
         });
 
         setDomainMap((currentMap) => mapsAreEqual(currentMap, nextMap) ? currentMap : nextMap);
@@ -148,10 +151,13 @@ function App() {
             connectToActiveTab();
         };
 
-        const handleTabUpdate = (tabId: number, changeInfo: { status?: string }) => {
-            if (tabId === activeTabId && changeInfo.status === 'loading') {
-                resetDomains();
-                startLoadingWithFallback();
+        const handleTabUpdate = (tabId: number, changeInfo: { status?: string, url?: string }) => {
+            if (tabId === activeTabId && changeInfo.url) {
+                if (!changeInfo.url.startsWith('http')) {
+                    resetDomains();
+                    setLoading(false);
+                    disconnectPort();
+                }
             }
         };
 
@@ -243,7 +249,7 @@ function App() {
                                 </tr>
                             ) : (
                                 domains.map((item) => (
-                                    <tr key={item.domain} className="group hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors relative">
+                                    <tr key={item.domain} className={`group relative transition-colors ${item.active ? 'bg-blue-100 dark:bg-blue-900/40 hover:bg-blue-200 dark:hover:bg-blue-900/60' : 'hover:bg-indigo-50 dark:hover:bg-indigo-900/30'}`}>
                                         <td className="p-3 relative overflow-hidden" colSpan={2}>
                                             <span className="block font-bold text-lg text-black dark:text-white select-text cursor-text whitespace-nowrap overflow-hidden pr-2" style={{ fontFamily: '"Segoe UI", sans-serif' }}>
                                                 {item.domain}

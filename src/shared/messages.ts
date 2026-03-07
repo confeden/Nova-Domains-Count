@@ -5,6 +5,7 @@ export const TAB_DOMAINS_UPDATE_MESSAGE_TYPE = 'TAB_DOMAINS_UPDATE';
 export type DomainEntry = {
     domain: string;
     count: number;
+    active?: boolean;
 };
 
 export type SubscribeTabMessage = {

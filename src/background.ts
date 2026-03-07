@@ -12,6 +12,7 @@ import {
 
 const UPDATE_THROTTLE_MS = 100;
 const tabDomainCounts = new Map<number, Map<string, number>>();
+const tabActiveConnections = new Map<number, Map<string, number>>();
 const tabSubscribers = new Map<number, Set<chrome.runtime.Port>>();
 const updateTimers = new Map<number, number>();
 
@@ -26,7 +27,13 @@ function buildSnapshot(tabId: number): DomainEntry[] {
     const domainCounts = tabDomainCounts.get(tabId);
     if (!domainCounts) return [];
 
-    return Array.from(domainCounts.entries()).map(([domain, count]) => ({ domain, count }));
+    const activeMap = tabActiveConnections.get(tabId);
+
+    return Array.from(domainCounts.entries()).map(([domain, count]) => ({
+        domain,
+        count,
+        active: activeMap ? (activeMap.get(domain) ?? 0) > 0 : false
+    }));
 }
 
 function getOrCreateTabDomainCounts(tabId: number): Map<string, number> {
@@ -82,6 +89,7 @@ function clearTabData(tabId: number): void {
     }
 
     tabDomainCounts.delete(tabId);
+    tabActiveConnections.delete(tabId);
 }
 
 function addRequest(tabId: number, url: string, isMainFrame: boolean): void {
@@ -90,6 +98,7 @@ function addRequest(tabId: number, url: string, isMainFrame: boolean): void {
     // Новый main_frame = новая навигация вкладки, сбрасываем предыдущий список.
     if (isMainFrame) {
         tabDomainCounts.set(tabId, new Map());
+        tabActiveConnections.set(tabId, new Map());
     }
 
     const rootDomain = getRootDomain(url);
@@ -102,7 +111,28 @@ function addRequest(tabId: number, url: string, isMainFrame: boolean): void {
 
     const domainCounts = getOrCreateTabDomainCounts(tabId);
     domainCounts.set(rootDomain, (domainCounts.get(rootDomain) ?? 0) + 1);
+
+    const activeConnections = tabActiveConnections.get(tabId) ?? new Map<string, number>();
+    activeConnections.set(rootDomain, (activeConnections.get(rootDomain) ?? 0) + 1);
+    tabActiveConnections.set(tabId, activeConnections);
+
     scheduleSnapshot(tabId);
+}
+
+function removeActiveRequest(tabId: number, url: string): void {
+    if (tabId < 0) return;
+    
+    const rootDomain = getRootDomain(url);
+    if (rootDomain === 'unknown') return;
+
+    const activeConnections = tabActiveConnections.get(tabId);
+    if (!activeConnections) return;
+
+    const current = activeConnections.get(rootDomain) ?? 0;
+    if (current > 0) {
+        activeConnections.set(rootDomain, current - 1);
+        scheduleSnapshot(tabId);
+    }
 }
 
 function subscribePortToTab(port: chrome.runtime.Port, tabId: number): void {
@@ -126,6 +156,20 @@ chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
         addRequest(details.tabId, details.url, details.type === 'main_frame');
         return undefined;
+    },
+    { urls: ['<all_urls>'] }
+);
+
+chrome.webRequest.onCompleted.addListener(
+    (details) => {
+        removeActiveRequest(details.tabId, details.url);
+    },
+    { urls: ['<all_urls>'] }
+);
+
+chrome.webRequest.onErrorOccurred.addListener(
+    (details) => {
+        removeActiveRequest(details.tabId, details.url);
     },
     { urls: ['<all_urls>'] }
 );
