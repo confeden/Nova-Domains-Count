@@ -4,7 +4,7 @@
 
 
 
-<img width="905" height="645" alt="image" src="https://github.com/user-attachments/assets/b5e19d27-0ad4-46e6-8471-9d704510c3cd" />
+<img width="450" alt="image" src="https://github.com/user-attachments/assets/b5e19d27-0ad4-46e6-8471-9d704510c3cd" />
 
 
   ## Основные возможности
@@ -34,7 +34,5 @@
 
 Расширение работает полностью локально в вашем браузере. Оно не собирает, не хранит и не передает никакие данные на внешние серверы. Весь перехват происходит внутри контекста страницы исключительно для целей отображения статистики в Popup-окне.
 
----
-Brent ©
-
-https://t.me/app_nova
+#
+🙋 Группа в ТГ: https://t.me/nova_txt
