@@ -149,6 +149,20 @@ function getOrCreateTabDomainCounts(tabId: number): Map<string, number> {
     return created;
 }
 
+function ensureTabDomainFromUrl(tabId: number, url: string, defaultCount = 1): void {
+    const rootDomain = getRootDomain(url);
+    if (rootDomain === 'unknown') return;
+
+    const domainCounts = getOrCreateTabDomainCounts(tabId);
+    if (!domainCounts.has(rootDomain)) {
+        domainCounts.set(rootDomain, defaultCount);
+    }
+
+    updateOriginTabIndex(tabId, getOrigin(url));
+    scheduleSnapshot(tabId);
+    schedulePersistState();
+}
+
 function serializeState(): PersistedSessionState {
     const serializedState: PersistedSessionState = {};
 
@@ -274,6 +288,12 @@ function clearTabData(tabId: number): void {
     schedulePersistState();
 }
 
+function resetTabTracking(tabId: number): void {
+    tabDomainCounts.set(tabId, new Map());
+    tabActiveConnections.set(tabId, new Map());
+    clearTabDocumentLinks(tabId);
+}
+
 function addRequest(details: RequestDetails): void {
     const resolvedTabId = resolveTabId(details);
     if (resolvedTabId < 0) return;
@@ -282,9 +302,7 @@ function addRequest(details: RequestDetails): void {
 
     // Новый main_frame = новая навигация вкладки, сбрасываем предыдущий список.
     if (isMainFrame) {
-        tabDomainCounts.set(resolvedTabId, new Map());
-        tabActiveConnections.set(resolvedTabId, new Map());
-        clearTabDocumentLinks(resolvedTabId);
+        resetTabTracking(resolvedTabId);
         rememberDocumentTabLink(resolvedTabId, details.documentId);
         updateOriginTabIndex(resolvedTabId, getOrigin(details.url));
     }
@@ -330,10 +348,23 @@ function removeActiveRequest(details: RequestDetails): void {
     }
 }
 
-function subscribePortToTab(port: chrome.runtime.Port, tabId: number): void {
+async function primeTabFromCurrentUrl(tabId: number): Promise<void> {
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        if (!tab.url?.startsWith('http')) return;
+
+        ensureTabDomainFromUrl(tabId, tab.url);
+    } catch {
+        // Tab could disappear between subscribe and lookup.
+    }
+}
+
+async function subscribePortToTab(port: chrome.runtime.Port, tabId: number): Promise<void> {
     const subscribers = tabSubscribers.get(tabId) ?? new Set<chrome.runtime.Port>();
     subscribers.add(port);
     tabSubscribers.set(tabId, subscribers);
+
+    await primeTabFromCurrentUrl(tabId);
     postSnapshot(tabId);
 }
 
@@ -390,7 +421,7 @@ chrome.runtime.onConnect.addListener((port) => {
             }
 
             subscribedTabId = tabId;
-            subscribePortToTab(port, subscribedTabId);
+            void subscribePortToTab(port, subscribedTabId);
         });
     });
 
@@ -404,6 +435,24 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
     runWithRestoredState(() => {
         clearTabData(tabId);
+    });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    runWithRestoredState(() => {
+        const candidateUrl = changeInfo.url ?? tab.url;
+        if (!candidateUrl) return;
+
+        if (!candidateUrl.startsWith('http')) {
+            clearTabData(tabId);
+            return;
+        }
+
+        if (changeInfo.status === 'loading') {
+            resetTabTracking(tabId);
+        }
+
+        ensureTabDomainFromUrl(tabId, candidateUrl);
     });
 });
 
