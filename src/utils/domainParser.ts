@@ -2,6 +2,14 @@ const domainCache = new Map<string, string>();
 const ipv4Pattern = /^(?:\d{1,3}\.){3}\d{1,3}$/;
 const ipv6Pattern = /^[0-9a-f:]+$/i;
 
+function normalizeHostname(rawHostname: string): string {
+    if (rawHostname.startsWith('[') && rawHostname.endsWith(']')) {
+        return rawHostname.slice(1, -1).toLowerCase();
+    }
+
+    return rawHostname.toLowerCase();
+}
+
 function isValidIpv4(hostname: string): boolean {
     if (!ipv4Pattern.test(hostname)) return false;
     return hostname.split('.').every((part) => {
@@ -18,15 +26,17 @@ function isIpAddress(hostname: string): boolean {
 
 export function getRootDomain(url: string): string {
     try {
-        const hostname = new URL(url).hostname.toLowerCase();
-        if (!hostname || isIpAddress(hostname)) return 'unknown';
+        const hostname = normalizeHostname(new URL(url).hostname);
+        if (!hostname) return 'unknown';
 
         if (domainCache.has(hostname)) return domainCache.get(hostname)!;
 
         const parts = hostname.split('.');
         let result: string;
 
-        if (parts.length <= 2) {
+        if (isIpAddress(hostname) || parts.length <= 1) {
+            result = hostname;
+        } else if (parts.length <= 2) {
             result = hostname;
         } else {
             const lastPart = parts[parts.length - 1];

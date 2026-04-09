@@ -225,19 +225,25 @@ function App() {
                 ) : (
                     <table className="w-full border-collapse table-fixed">
                         <thead className="bg-gray-100 dark:bg-gray-800 sticky top-0 z-10 shadow-sm transition-colors">
-                            <tr>
-                                <th className="p-3 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider w-[30%] text-nowrap">Domains</th>
-                                <th className="p-3 text-center text-[10px] font-medium text-gray-400 dark:text-gray-500 w-[50%]">
-                                    <div className="whitespace-nowrap overflow-hidden">
-                                        Brent | <a
-                                            href="https://t.me/app_nova"
+                            <tr className="h-[40px]">
+                                <th className="relative p-0 text-left" colSpan={2}>
+                                    <div className="absolute left-3 right-3 top-0 truncate text-[10px] font-medium text-gray-400 dark:text-gray-500 normal-case tracking-normal">
+                                        Nova Domains Count v1.3 | <a
+                                            href="https://t.me/nova_txt"
                                             target="_blank"
                                             rel="noopener noreferrer"
-                                            className="text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 dark:hover:text-indigo-300 underline lowercase"
-                                        >t.me/app_nova</a>
+                                            className="text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 dark:hover:text-indigo-300 underline"
+                                        >t.me/nova_txt</a>
+                                    </div>
+                                    <div className="absolute bottom-0.5 left-3 text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                                        Domains
                                     </div>
                                 </th>
-                                <th className="p-3 text-right text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider w-[20%] text-nowrap">Count</th>
+                                <th className="relative p-0 text-right">
+                                    <div className="absolute bottom-0.5 right-3 text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider text-nowrap">
+                                        Count
+                                    </div>
+                                </th>
                             </tr>
                         </thead>
                         <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-800 transition-colors">
