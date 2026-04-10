@@ -14,7 +14,26 @@ const COPY_ERROR_LABEL = 'Copy failed';
 const COPY_RESET_TIMEOUT_MS = 2000;
 const LOADING_FALLBACK_MS = 1200;
 
-function mapsAreEqual(left: Map<string, { count: number; active?: boolean }>, right: Map<string, { count: number; active?: boolean }>): boolean {
+function getTrackableTabUrl(tab: chrome.tabs.Tab | undefined): string | null {
+    const candidateUrl = tab?.pendingUrl ?? tab?.url;
+    if (!candidateUrl?.startsWith('http')) return null;
+    return candidateUrl;
+}
+
+type DomainState = {
+    count: number;
+    active?: boolean;
+    localAddresses?: string[];
+};
+
+function arraysAreEqual(left: string[] | undefined, right: string[] | undefined): boolean {
+    if (!left?.length && !right?.length) return true;
+    if (!left || !right || left.length !== right.length) return false;
+
+    return left.every((value, index) => value === right[index]);
+}
+
+function mapsAreEqual(left: Map<string, DomainState>, right: Map<string, DomainState>): boolean {
     if (left.size !== right.size) return false;
 
     for (const [domain, val] of left.entries()) {
@@ -22,13 +41,14 @@ function mapsAreEqual(left: Map<string, { count: number; active?: boolean }>, ri
         if (!rightVal) return false;
         if (rightVal.count !== val.count) return false;
         if (!!rightVal.active !== !!val.active) return false;
+        if (!arraysAreEqual(rightVal.localAddresses, val.localAddresses)) return false;
     }
 
     return true;
 }
 
 function App() {
-    const [domainMap, setDomainMap] = useState<Map<string, { count: number; active?: boolean }>>(new Map());
+    const [domainMap, setDomainMap] = useState<Map<string, DomainState>>(new Map());
     const [loading, setLoading] = useState(true);
     const [copyStatus, setCopyStatus] = useState(COPY_DEFAULT_LABEL);
     const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
@@ -55,15 +75,30 @@ function App() {
                 if (countDiff !== 0) return countDiff;
                 return left[0].localeCompare(right[0]);
             })
-            .map(([domain, val]) => ({ domain, count: val.count, active: val.active }));
+            .map(([domain, val]) => ({
+                domain,
+                count: val.count,
+                active: val.active,
+                localAddresses: val.localAddresses
+            }));
     }, [domainMap]);
 
     const applyDomainSnapshot = (domainEntries: DomainEntry[]) => {
-        const nextMap = new Map<string, { count: number; active?: boolean }>();
+        const nextMap = new Map<string, DomainState>();
 
         domainEntries.forEach((entry) => {
             if (!entry?.domain || entry.domain === 'unknown') return;
-            nextMap.set(entry.domain, { count: entry.count, active: entry.active });
+            const localAddresses = Array.isArray(entry.localAddresses)
+                ? entry.localAddresses
+                    .filter((address): address is string => typeof address === 'string' && address.length > 0)
+                    .sort((left, right) => left.localeCompare(right))
+                : undefined;
+
+            nextMap.set(entry.domain, {
+                count: entry.count,
+                active: entry.active,
+                localAddresses
+            });
         });
 
         setDomainMap((currentMap) => mapsAreEqual(currentMap, nextMap) ? currentMap : nextMap);
@@ -73,6 +108,7 @@ function App() {
     useEffect(() => {
         let port: chrome.runtime.Port | null = null;
         let activeTabId: number | null = null;
+        let activeTabUrl: string | null = null;
         let loadingFallbackTimer: number | null = null;
 
         const clearLoadingFallback = () => {
@@ -128,13 +164,17 @@ function App() {
             startLoadingWithFallback();
         };
 
-        const connectToActiveTab = () => {
+        const connectToActiveTab = (forceResubscribe = false) => {
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                 const activeTab = tabs[0];
                 const tabId = activeTab?.id;
+                const trackableUrl = getTrackableTabUrl(activeTab);
+                const previousTabId = activeTabId;
+                const previousTabUrl = activeTabUrl;
 
-                if (typeof tabId !== 'number' || !activeTab?.url?.startsWith('http')) {
+                if (typeof tabId !== 'number') {
                     activeTabId = null;
+                    activeTabUrl = null;
                     resetDomains();
                     setLoading(false);
                     disconnectPort();
@@ -142,22 +182,47 @@ function App() {
                 }
 
                 activeTabId = tabId;
+
+                if (!trackableUrl) {
+                    activeTabUrl = null;
+                    resetDomains();
+                    setLoading(false);
+                    disconnectPort();
+                    return;
+                }
+
+                if (!forceResubscribe && port && previousTabId === tabId && previousTabUrl === trackableUrl) {
+                    activeTabUrl = trackableUrl;
+                    return;
+                }
+
+                activeTabUrl = trackableUrl;
                 resetDomains();
                 subscribeToTab(tabId);
             });
         };
 
         const handleTabActivated = () => {
-            connectToActiveTab();
+            connectToActiveTab(true);
         };
 
-        const handleTabUpdate = (tabId: number, changeInfo: { status?: string, url?: string }) => {
-            if (tabId === activeTabId && changeInfo.url) {
-                if (!changeInfo.url.startsWith('http')) {
-                    resetDomains();
-                    setLoading(false);
-                    disconnectPort();
-                }
+        const handleTabUpdate = (
+            tabId: number,
+            changeInfo: { status?: string, url?: string },
+            tab: chrome.tabs.Tab
+        ) => {
+            const isRelevantTab = tabId === activeTabId || !!tab.active;
+            if (!isRelevantTab) return;
+
+            const trackableUrl = getTrackableTabUrl(tab);
+            if (changeInfo.status === 'loading') {
+                connectToActiveTab(true);
+                return;
+            }
+
+            if (changeInfo.url || trackableUrl) {
+                const shouldResubscribe = tabId !== activeTabId || activeTabUrl !== trackableUrl;
+                connectToActiveTab(shouldResubscribe);
             }
         };
 
@@ -225,22 +290,22 @@ function App() {
                 ) : (
                     <table className="w-full border-collapse table-fixed">
                         <thead className="bg-gray-100 dark:bg-gray-800 sticky top-0 z-10 shadow-sm transition-colors">
-                            <tr className="h-[40px]">
+                            <tr className="h-[36px]">
                                 <th className="relative p-0 text-left" colSpan={2}>
-                                    <div className="absolute left-3 right-3 top-0 truncate text-[10px] font-medium text-gray-400 dark:text-gray-500 normal-case tracking-normal">
-                                        Nova Domains Count v1.3 | <a
+                                    <div className="absolute left-3 right-3 top-px truncate text-[10px] font-medium text-gray-400 dark:text-gray-500 normal-case tracking-normal">
+                                        Nova Domains Count v1.4 | <a
                                             href="https://t.me/nova_txt"
                                             target="_blank"
                                             rel="noopener noreferrer"
                                             className="text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 dark:hover:text-indigo-300 underline"
                                         >t.me/nova_txt</a>
                                     </div>
-                                    <div className="absolute bottom-0.5 left-3 text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                                    <div className="absolute bottom-[3px] left-3 text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                                         Domains
                                     </div>
                                 </th>
                                 <th className="relative p-0 text-right">
-                                    <div className="absolute bottom-0.5 right-3 text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider text-nowrap">
+                                    <div className="absolute bottom-[3px] right-3 text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider text-nowrap">
                                         Count
                                     </div>
                                 </th>
@@ -255,19 +320,28 @@ function App() {
                                 </tr>
                             ) : (
                                 domains.map((item) => (
-                                    <tr key={item.domain} className={`group relative transition-colors ${item.active ? 'bg-blue-100 dark:bg-blue-900/40 hover:bg-blue-200 dark:hover:bg-blue-900/60' : 'hover:bg-indigo-50 dark:hover:bg-indigo-900/30'}`}>
-                                        <td className="p-3 relative overflow-hidden" colSpan={2}>
-                                            <span className="block font-bold text-lg text-black dark:text-white select-text cursor-text whitespace-nowrap overflow-hidden pr-2" style={{ fontFamily: '"Segoe UI", sans-serif' }}>
-                                                {item.domain}
-                                            </span>
+                                    <tr key={item.domain} className={`group relative h-[44px] transition-colors ${item.active ? 'bg-blue-100 dark:bg-blue-900/40 hover:bg-blue-200 dark:hover:bg-blue-900/60' : 'hover:bg-indigo-50 dark:hover:bg-indigo-900/30'}`}>
+                                        <td className="px-3 py-0 relative align-middle" colSpan={2}>
+                                            <div className="relative h-[44px]">
+                                                <div className="flex h-full items-center">
+                                                    <span className="block max-w-full whitespace-nowrap font-bold text-lg leading-[1.2] text-black dark:text-white select-text cursor-text group-hover:max-w-[calc(100%-68px)] group-hover:truncate" style={{ fontFamily: '"Segoe UI", sans-serif' }}>
+                                                        {item.domain}
+                                                    </span>
+                                                </div>
+                                                {item.localAddresses && item.localAddresses.length > 0 && (
+                                                    <span className="absolute bottom-[1px] left-0 right-0 truncate pr-2 text-[9px] leading-none font-medium text-amber-800 dark:text-amber-500 opacity-80">
+                                                        {item.localAddresses.join(', ')}
+                                                    </span>
+                                                )}
+                                            </div>
                                             <button
                                                 onClick={() => copySingleDomain(item.domain)}
-                                                className="hidden group-hover:block absolute right-2 top-1/2 -translate-y-1/2 bg-green-500 hover:bg-green-600 dark:bg-green-600 dark:hover:bg-green-700 text-white text-xs font-semibold py-1.5 px-3 rounded-lg shadow-xl transition-all active:scale-95 z-20 border border-white dark:border-gray-800"
+                                                className="hidden group-hover:block absolute right-0 top-1/2 -translate-y-1/2 bg-green-500 hover:bg-green-600 dark:bg-green-600 dark:hover:bg-green-700 text-white text-xs font-semibold py-1.5 px-3 rounded-lg shadow-xl transition-all active:scale-95 z-20 border border-white dark:border-gray-800"
                                             >
                                                 Copy
                                             </button>
                                         </td>
-                                        <td className="p-3 text-right align-middle">
+                                        <td className="px-3 py-0 text-right align-middle">
                                             <span className="inline-block bg-indigo-100 dark:bg-indigo-900/50 text-indigo-800 dark:text-indigo-300 text-sm font-bold px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-800 transition-colors">
                                                 {item.count}
                                             </span>

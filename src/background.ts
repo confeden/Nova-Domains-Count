@@ -23,14 +23,20 @@ type RequestDetails = {
     url: string;
 };
 
+type RequestWithIpDetails = RequestDetails & {
+    ip?: string;
+};
+
 type PersistedTabState = {
     domainCounts: Record<string, number>;
+    localAddresses?: Record<string, string[]>;
     topLevelOrigin?: string;
 };
 
 type PersistedSessionState = Record<string, PersistedTabState>;
 
 const tabDomainCounts = new Map<number, Map<string, number>>();
+const tabDomainLocalAddresses = new Map<number, Map<string, Set<string>>>();
 const tabActiveConnections = new Map<number, Map<string, number>>();
 const tabSubscribers = new Map<number, Set<chrome.runtime.Port>>();
 const documentTabIds = new Map<string, number>();
@@ -42,6 +48,9 @@ let persistTimerId: number | null = null;
 const restoredStatePromise = restorePersistedState().catch((error) => {
     console.error('Failed to restore tracked tab state', error);
 });
+const ipv4Pattern = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+const ipv6Pattern = /^[0-9a-f:]+$/i;
+const localIpv6LinkLocalPattern = /^fe[89ab]/i;
 
 function isSubscribeTabMessage(message: unknown): message is SubscribeTabMessage {
     if (!message || typeof message !== 'object') return false;
@@ -55,12 +64,112 @@ function buildSnapshot(tabId: number): DomainEntry[] {
     if (!domainCounts) return [];
 
     const activeMap = tabActiveConnections.get(tabId);
+    const localAddressMap = tabDomainLocalAddresses.get(tabId);
 
     return Array.from(domainCounts.entries()).map(([domain, count]) => ({
         domain,
         count,
-        active: activeMap ? (activeMap.get(domain) ?? 0) > 0 : false
+        active: activeMap ? (activeMap.get(domain) ?? 0) > 0 : false,
+        localAddresses: localAddressMap?.has(domain)
+            ? Array.from(localAddressMap.get(domain)!).sort((left, right) => left.localeCompare(right))
+            : undefined
     }));
+}
+
+function normalizeAddress(rawAddress: string): string {
+    if (rawAddress.startsWith('[') && rawAddress.endsWith(']')) {
+        return rawAddress.slice(1, -1).toLowerCase();
+    }
+
+    return rawAddress.toLowerCase();
+}
+
+function parseStoredLocalAddress(localAddress: string): { host: string; port: string | null } {
+    if (localAddress.startsWith('[')) {
+        const closingBracketIndex = localAddress.indexOf(']');
+        if (closingBracketIndex > 0) {
+            const host = normalizeAddress(localAddress.slice(1, closingBracketIndex));
+            const remainder = localAddress.slice(closingBracketIndex + 1);
+
+            return {
+                host,
+                port: remainder.startsWith(':') ? remainder.slice(1) || null : null
+            };
+        }
+    }
+
+    const hostWithPortMatch = localAddress.match(/^([^:]+):(\d+)$/);
+    if (hostWithPortMatch) {
+        return {
+            host: normalizeAddress(hostWithPortMatch[1]),
+            port: hostWithPortMatch[2]
+        };
+    }
+
+    return {
+        host: normalizeAddress(localAddress),
+        port: null
+    };
+}
+
+function isValidIpv4(address: string): boolean {
+    if (!ipv4Pattern.test(address)) return false;
+
+    return address.split('.').every((part) => {
+        const value = Number(part);
+        return Number.isInteger(value) && value >= 0 && value <= 255;
+    });
+}
+
+function isLocalIpv4(address: string): boolean {
+    if (!isValidIpv4(address)) return false;
+
+    const [firstOctet, secondOctet] = address.split('.').map(Number);
+    return firstOctet === 10
+        || firstOctet === 127
+        || (firstOctet === 169 && secondOctet === 254)
+        || (firstOctet === 172 && secondOctet >= 16 && secondOctet <= 31)
+        || (firstOctet === 192 && secondOctet === 168);
+}
+
+function isLocalIpv6(address: string): boolean {
+    if (!address.includes(':') || !ipv6Pattern.test(address)) return false;
+
+    return address === '::1'
+        || address.startsWith('fc')
+        || address.startsWith('fd')
+        || localIpv6LinkLocalPattern.test(address);
+}
+
+function isLocalHostname(hostname: string): boolean {
+    return hostname === 'localhost' || hostname.endsWith('.localhost');
+}
+
+function getLocalAddressFromUrl(url: string): string | null {
+    try {
+        const parsedUrl = new URL(url);
+        const hostname = normalizeAddress(parsedUrl.hostname);
+        if (!hostname) return null;
+
+        if (isLocalHostname(hostname) || isLocalIpv4(hostname) || isLocalIpv6(hostname)) {
+            return hostname;
+        }
+    } catch {
+        return null;
+    }
+
+    return null;
+}
+
+function getLocalAddressFromIp(ip: string | undefined): string | null {
+    if (!ip) return null;
+
+    const normalizedIp = normalizeAddress(ip);
+    if (isLocalIpv4(normalizedIp) || isLocalIpv6(normalizedIp)) {
+        return normalizedIp;
+    }
+
+    return null;
 }
 
 function getOrigin(url: string | undefined): string | null {
@@ -72,6 +181,12 @@ function getOrigin(url: string | undefined): string | null {
     } catch {
         return null;
     }
+}
+
+function getTrackableTabUrl(tab: chrome.tabs.Tab): string | null {
+    const candidateUrl = tab.pendingUrl ?? tab.url;
+    if (!candidateUrl?.startsWith('http')) return null;
+    return candidateUrl;
 }
 
 function rememberDocumentTabLink(tabId: number, documentId: string | undefined): void {
@@ -149,6 +264,38 @@ function getOrCreateTabDomainCounts(tabId: number): Map<string, number> {
     return created;
 }
 
+function getOrCreateTabDomainLocalAddresses(tabId: number): Map<string, Set<string>> {
+    const existing = tabDomainLocalAddresses.get(tabId);
+    if (existing) return existing;
+
+    const created = new Map<string, Set<string>>();
+    tabDomainLocalAddresses.set(tabId, created);
+    return created;
+}
+
+function recordLocalAddress(tabId: number, domain: string, localAddress: string): void {
+    if (!domain || !localAddress) return;
+
+    const domainLocalAddresses = getOrCreateTabDomainLocalAddresses(tabId);
+    const knownAddresses = domainLocalAddresses.get(domain) ?? new Set<string>();
+    const nextAddress = parseStoredLocalAddress(localAddress);
+
+    for (const existingAddress of Array.from(knownAddresses)) {
+        const parsedExistingAddress = parseStoredLocalAddress(existingAddress);
+        if (parsedExistingAddress.host !== nextAddress.host) continue;
+        knownAddresses.delete(existingAddress);
+    }
+
+    const previousSize = knownAddresses.size;
+    knownAddresses.add(nextAddress.host);
+    domainLocalAddresses.set(domain, knownAddresses);
+
+    if (knownAddresses.size !== previousSize) {
+        scheduleSnapshot(tabId);
+        schedulePersistState();
+    }
+}
+
 function ensureTabDomainFromUrl(tabId: number, url: string, defaultCount = 1): void {
     const rootDomain = getRootDomain(url);
     if (rootDomain === 'unknown') return;
@@ -159,6 +306,11 @@ function ensureTabDomainFromUrl(tabId: number, url: string, defaultCount = 1): v
     }
 
     updateOriginTabIndex(tabId, getOrigin(url));
+    const directLocalAddress = getLocalAddressFromUrl(url);
+    if (directLocalAddress) {
+        recordLocalAddress(tabId, rootDomain, directLocalAddress);
+    }
+
     scheduleSnapshot(tabId);
     schedulePersistState();
 }
@@ -171,6 +323,14 @@ function serializeState(): PersistedSessionState {
 
         serializedState[String(tabId)] = {
             domainCounts: Object.fromEntries(domainCounts),
+            localAddresses: tabDomainLocalAddresses.has(tabId)
+                ? Object.fromEntries(
+                    Array.from(tabDomainLocalAddresses.get(tabId)!.entries()).map(([domain, addresses]) => [
+                        domain,
+                        Array.from(addresses).sort((left, right) => left.localeCompare(right))
+                    ])
+                )
+                : undefined,
             topLevelOrigin: tabTopLevelOrigins.get(tabId)
         };
     });
@@ -228,6 +388,21 @@ async function restorePersistedState(): Promise<void> {
             tabDomainCounts.set(tabId, restoredCounts);
         }
 
+        const restoredLocalAddresses = new Map<string, Set<string>>();
+        Object.entries(persistedState.localAddresses ?? {}).forEach(([domain, addresses]) => {
+            const normalizedAddresses = (Array.isArray(addresses) ? addresses : [])
+                .map((address) => typeof address === 'string' ? parseStoredLocalAddress(address).host : '')
+                .filter(Boolean);
+
+            if (domain && normalizedAddresses.length > 0) {
+                restoredLocalAddresses.set(domain, new Set(normalizedAddresses));
+            }
+        });
+
+        if (restoredLocalAddresses.size > 0) {
+            tabDomainLocalAddresses.set(tabId, restoredLocalAddresses);
+        }
+
         if (typeof persistedState.topLevelOrigin === 'string') {
             updateOriginTabIndex(tabId, persistedState.topLevelOrigin);
         }
@@ -282,6 +457,7 @@ function clearTabData(tabId: number): void {
     }
 
     tabDomainCounts.delete(tabId);
+    tabDomainLocalAddresses.delete(tabId);
     tabActiveConnections.delete(tabId);
     clearTabDocumentLinks(tabId);
     updateOriginTabIndex(tabId, null);
@@ -290,8 +466,17 @@ function clearTabData(tabId: number): void {
 
 function resetTabTracking(tabId: number): void {
     tabDomainCounts.set(tabId, new Map());
+    tabDomainLocalAddresses.set(tabId, new Map());
     tabActiveConnections.set(tabId, new Map());
     clearTabDocumentLinks(tabId);
+}
+
+function seedTopLevelNavigation(tabId: number, url: string): void {
+    if (tabId < 0 || !url.startsWith('http')) return;
+
+    resetTabTracking(tabId);
+    updateOriginTabIndex(tabId, getOrigin(url));
+    ensureTabDomainFromUrl(tabId, url);
 }
 
 function addRequest(details: RequestDetails): void {
@@ -348,12 +533,26 @@ function removeActiveRequest(details: RequestDetails): void {
     }
 }
 
+function trackLocalAddress(details: RequestWithIpDetails): void {
+    const resolvedTabId = resolveTabId(details);
+    if (resolvedTabId < 0) return;
+
+    const rootDomain = getRootDomain(details.url);
+    if (rootDomain === 'unknown') return;
+
+    const localAddress = getLocalAddressFromUrl(details.url) ?? getLocalAddressFromIp(details.ip);
+    if (!localAddress) return;
+
+    recordLocalAddress(resolvedTabId, rootDomain, localAddress);
+}
+
 async function primeTabFromCurrentUrl(tabId: number): Promise<void> {
     try {
         const tab = await chrome.tabs.get(tabId);
-        if (!tab.url?.startsWith('http')) return;
+        const candidateUrl = getTrackableTabUrl(tab);
+        if (!candidateUrl) return;
 
-        ensureTabDomainFromUrl(tabId, tab.url);
+        ensureTabDomainFromUrl(tabId, candidateUrl);
     } catch {
         // Tab could disappear between subscribe and lookup.
     }
@@ -391,7 +590,17 @@ chrome.webRequest.onBeforeRequest.addListener(
 chrome.webRequest.onCompleted.addListener(
     (details) => {
         runWithRestoredState(() => {
+            trackLocalAddress(details);
             removeActiveRequest(details);
+        });
+    },
+    { urls: ['<all_urls>'] }
+);
+
+chrome.webRequest.onResponseStarted.addListener(
+    (details) => {
+        runWithRestoredState(() => {
+            trackLocalAddress(details);
         });
     },
     { urls: ['<all_urls>'] }
@@ -400,6 +609,7 @@ chrome.webRequest.onCompleted.addListener(
 chrome.webRequest.onErrorOccurred.addListener(
     (details) => {
         runWithRestoredState(() => {
+            trackLocalAddress(details);
             removeActiveRequest(details);
         });
     },
@@ -438,9 +648,16 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     });
 });
 
+chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+    runWithRestoredState(() => {
+        if (details.frameId !== 0) return;
+        seedTopLevelNavigation(details.tabId, details.url);
+    });
+});
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     runWithRestoredState(() => {
-        const candidateUrl = changeInfo.url ?? tab.url;
+        const candidateUrl = tab.pendingUrl ?? changeInfo.url ?? tab.url;
         if (!candidateUrl) return;
 
         if (!candidateUrl.startsWith('http')) {

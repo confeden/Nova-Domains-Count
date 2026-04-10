@@ -6,6 +6,7 @@ export type DomainEntry = {
     domain: string;
     count: number;
     active?: boolean;
+    localAddresses?: string[];
 };
 
 export type SubscribeTabMessage = {
