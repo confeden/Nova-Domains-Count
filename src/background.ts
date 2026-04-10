@@ -41,6 +41,7 @@ const tabActiveConnections = new Map<number, Map<string, number>>();
 const tabSubscribers = new Map<number, Set<chrome.runtime.Port>>();
 const documentTabIds = new Map<string, number>();
 const tabDocumentIds = new Map<number, Set<string>>();
+const tabKnownOrigins = new Map<number, Set<string>>();
 const tabTopLevelOrigins = new Map<number, string>();
 const originTabIds = new Map<string, Set<number>>();
 const updateTimers = new Map<number, number>();
@@ -207,26 +208,43 @@ function clearTabDocumentLinks(tabId: number): void {
     tabDocumentIds.delete(tabId);
 }
 
-function updateOriginTabIndex(tabId: number, nextOrigin: string | null): void {
-    const previousOrigin = tabTopLevelOrigins.get(tabId);
+function rememberKnownOrigin(tabId: number, origin: string | null): void {
+    if (tabId < 0 || !origin) return;
 
-    if (previousOrigin) {
-        const tabsForOrigin = originTabIds.get(previousOrigin);
+    const knownOrigins = tabKnownOrigins.get(tabId) ?? new Set<string>();
+    if (knownOrigins.has(origin)) return;
+
+    knownOrigins.add(origin);
+    tabKnownOrigins.set(tabId, knownOrigins);
+
+    const tabsForOrigin = originTabIds.get(origin) ?? new Set<number>();
+    tabsForOrigin.add(tabId);
+    originTabIds.set(origin, tabsForOrigin);
+}
+
+function clearKnownOrigins(tabId: number): void {
+    const knownOrigins = tabKnownOrigins.get(tabId);
+    if (!knownOrigins) return;
+
+    for (const origin of knownOrigins) {
+        const tabsForOrigin = originTabIds.get(origin);
         tabsForOrigin?.delete(tabId);
         if (tabsForOrigin && tabsForOrigin.size === 0) {
-            originTabIds.delete(previousOrigin);
+            originTabIds.delete(origin);
         }
     }
 
+    tabKnownOrigins.delete(tabId);
+}
+
+function updateOriginTabIndex(tabId: number, nextOrigin: string | null): void {
     if (!nextOrigin) {
         tabTopLevelOrigins.delete(tabId);
         return;
     }
 
-    const tabsForOrigin = originTabIds.get(nextOrigin) ?? new Set<number>();
-    tabsForOrigin.add(tabId);
-    originTabIds.set(nextOrigin, tabsForOrigin);
     tabTopLevelOrigins.set(tabId, nextOrigin);
+    rememberKnownOrigin(tabId, nextOrigin);
 }
 
 function resolveTabId(details: RequestDetails): number {
@@ -247,6 +265,14 @@ function resolveTabId(details: RequestDetails): number {
 
     if (details.initiator && details.initiator !== 'null') {
         const tabsForOrigin = originTabIds.get(details.initiator);
+        if (tabsForOrigin?.size === 1) {
+            return tabsForOrigin.values().next().value ?? -1;
+        }
+    }
+
+    const requestOrigin = getOrigin(details.url);
+    if (requestOrigin) {
+        const tabsForOrigin = originTabIds.get(requestOrigin);
         if (tabsForOrigin?.size === 1) {
             return tabsForOrigin.values().next().value ?? -1;
         }
@@ -306,6 +332,7 @@ function ensureTabDomainFromUrl(tabId: number, url: string, defaultCount = 1): v
     }
 
     updateOriginTabIndex(tabId, getOrigin(url));
+    rememberKnownOrigin(tabId, getOrigin(url));
     const directLocalAddress = getLocalAddressFromUrl(url);
     if (directLocalAddress) {
         recordLocalAddress(tabId, rootDomain, directLocalAddress);
@@ -460,6 +487,7 @@ function clearTabData(tabId: number): void {
     tabDomainLocalAddresses.delete(tabId);
     tabActiveConnections.delete(tabId);
     clearTabDocumentLinks(tabId);
+    clearKnownOrigins(tabId);
     updateOriginTabIndex(tabId, null);
     schedulePersistState();
 }
@@ -469,6 +497,7 @@ function resetTabTracking(tabId: number): void {
     tabDomainLocalAddresses.set(tabId, new Map());
     tabActiveConnections.set(tabId, new Map());
     clearTabDocumentLinks(tabId);
+    clearKnownOrigins(tabId);
 }
 
 function seedTopLevelNavigation(tabId: number, url: string): void {
@@ -491,6 +520,12 @@ function addRequest(details: RequestDetails): void {
         rememberDocumentTabLink(resolvedTabId, details.documentId);
         updateOriginTabIndex(resolvedTabId, getOrigin(details.url));
     }
+
+    rememberKnownOrigin(resolvedTabId, getOrigin(details.url));
+    rememberKnownOrigin(
+        resolvedTabId,
+        details.initiator && details.initiator !== 'null' ? details.initiator : null
+    );
 
     const rootDomain = getRootDomain(details.url);
     if (rootDomain === 'unknown') {
@@ -536,6 +571,12 @@ function removeActiveRequest(details: RequestDetails): void {
 function trackLocalAddress(details: RequestWithIpDetails): void {
     const resolvedTabId = resolveTabId(details);
     if (resolvedTabId < 0) return;
+
+    rememberKnownOrigin(resolvedTabId, getOrigin(details.url));
+    rememberKnownOrigin(
+        resolvedTabId,
+        details.initiator && details.initiator !== 'null' ? details.initiator : null
+    );
 
     const rootDomain = getRootDomain(details.url);
     if (rootDomain === 'unknown') return;
@@ -665,11 +706,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
             return;
         }
 
-        if (changeInfo.status === 'loading') {
-            resetTabTracking(tabId);
+        if (changeInfo.url || changeInfo.status === 'loading') {
+            ensureTabDomainFromUrl(tabId, candidateUrl);
         }
-
-        ensureTabDomainFromUrl(tabId, candidateUrl);
     });
 });
 

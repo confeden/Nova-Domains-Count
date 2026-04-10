@@ -191,8 +191,11 @@ function App() {
                     return;
                 }
 
-                if (!forceResubscribe && port && previousTabId === tabId && previousTabUrl === trackableUrl) {
+                if (port && previousTabId === tabId) {
                     activeTabUrl = trackableUrl;
+                    if (forceResubscribe && previousTabUrl !== trackableUrl) {
+                        startLoadingWithFallback();
+                    }
                     return;
                 }
 
@@ -216,13 +219,12 @@ function App() {
 
             const trackableUrl = getTrackableTabUrl(tab);
             if (changeInfo.status === 'loading') {
-                connectToActiveTab(true);
+                connectToActiveTab();
                 return;
             }
 
             if (changeInfo.url || trackableUrl) {
-                const shouldResubscribe = tabId !== activeTabId || activeTabUrl !== trackableUrl;
-                connectToActiveTab(shouldResubscribe);
+                connectToActiveTab(activeTabUrl !== trackableUrl);
             }
         };
 
@@ -289,11 +291,16 @@ function App() {
                     </div>
                 ) : (
                     <table className="w-full border-collapse table-fixed">
+                        <colgroup>
+                            <col />
+                            <col style={{ width: '68px' }} />
+                            <col style={{ width: '74px' }} />
+                        </colgroup>
                         <thead className="bg-gray-100 dark:bg-gray-800 sticky top-0 z-10 shadow-sm transition-colors">
                             <tr className="h-[36px]">
                                 <th className="relative p-0 text-left" colSpan={2}>
                                     <div className="absolute left-3 right-3 top-px truncate text-[10px] font-medium text-gray-400 dark:text-gray-500 normal-case tracking-normal">
-                                        Nova Domains Count v1.4 | <a
+                                        Nova Domains Count v1.5 | <a
                                             href="https://t.me/nova_txt"
                                             target="_blank"
                                             rel="noopener noreferrer"
@@ -321,10 +328,10 @@ function App() {
                             ) : (
                                 domains.map((item) => (
                                     <tr key={item.domain} className={`group relative h-[44px] transition-colors ${item.active ? 'bg-blue-100 dark:bg-blue-900/40 hover:bg-blue-200 dark:hover:bg-blue-900/60' : 'hover:bg-indigo-50 dark:hover:bg-indigo-900/30'}`}>
-                                        <td className="px-3 py-0 relative align-middle" colSpan={2}>
-                                            <div className="relative h-[44px]">
-                                                <div className="flex h-full items-center">
-                                                    <span className="block max-w-full whitespace-nowrap font-bold text-lg leading-[1.2] text-black dark:text-white select-text cursor-text group-hover:max-w-[calc(100%-68px)] group-hover:truncate" style={{ fontFamily: '"Segoe UI", sans-serif' }}>
+                                        <td className="px-3 py-0 relative align-middle">
+                                            <div className="relative h-[44px] overflow-visible">
+                                                <div className="flex h-full items-center overflow-visible">
+                                                    <span className="block max-w-none whitespace-nowrap overflow-visible font-bold text-lg leading-[1.2] text-black dark:text-white select-text cursor-text group-hover:max-w-full group-hover:truncate" style={{ fontFamily: '"Segoe UI", sans-serif' }}>
                                                         {item.domain}
                                                     </span>
                                                 </div>
@@ -334,9 +341,11 @@ function App() {
                                                     </span>
                                                 )}
                                             </div>
+                                        </td>
+                                        <td className="px-0.5 py-0 text-right align-middle">
                                             <button
                                                 onClick={() => copySingleDomain(item.domain)}
-                                                className="hidden group-hover:block absolute right-0 top-1/2 -translate-y-1/2 bg-green-500 hover:bg-green-600 dark:bg-green-600 dark:hover:bg-green-700 text-white text-xs font-semibold py-1.5 px-3 rounded-lg shadow-xl transition-all active:scale-95 z-20 border border-white dark:border-gray-800"
+                                                className="hidden group-hover:inline-flex items-center justify-center bg-green-500 hover:bg-green-600 dark:bg-green-600 dark:hover:bg-green-700 text-white text-xs font-semibold py-1.5 px-3 rounded-lg shadow-xl transition-all active:scale-95 border border-white dark:border-gray-800"
                                             >
                                                 Copy
                                             </button>

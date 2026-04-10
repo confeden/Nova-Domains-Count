@@ -8,7 +8,7 @@ import { crx, defineManifest } from '@crxjs/vite-plugin'
 const manifest = defineManifest({
     manifest_version: 3,
     name: "Nova Domains Count",
-    version: "1.4.0",
+    version: "1.5.0",
     action: {
         default_popup: "index.html",
         default_icon: "icon.png"
