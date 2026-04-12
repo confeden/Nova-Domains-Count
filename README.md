@@ -24,7 +24,7 @@
 
 ## Установка
 
-1.  Скачайте актуальный архив из [релиза](https://github.com/confeden/Nova-Domains-Count/releases).
+1.  Скачайте актуальный архив (например Nova_Domains_Count_v1.5.0.zip) из [релиза](https://github.com/confeden/Nova-Domains-Count/releases).
 2.  Распакуйте архив в удобное место.
 3.  Перейдите в `chrome://extensions/`.
 4.  Включите **"Режим разработчика"** (Developer mode).
