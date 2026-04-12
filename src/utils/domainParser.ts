@@ -24,34 +24,41 @@ function isIpAddress(hostname: string): boolean {
     return hostname.includes(':') && ipv6Pattern.test(hostname);
 }
 
-export function getRootDomain(url: string): string {
+export function getHostname(url: string): string {
     try {
         const hostname = normalizeHostname(new URL(url).hostname);
-        if (!hostname) return 'unknown';
-
-        if (domainCache.has(hostname)) return domainCache.get(hostname)!;
-
-        const parts = hostname.split('.');
-        let result: string;
-
-        if (isIpAddress(hostname) || parts.length <= 1) {
-            result = hostname;
-        } else if (parts.length <= 2) {
-            result = hostname;
-        } else {
-            const lastPart = parts[parts.length - 1];
-            const secondLastPart = parts[parts.length - 2];
-
-            result = secondLastPart.length <= 3 && lastPart.length <= 3
-                ? parts.slice(-3).join('.')
-                : parts.slice(-2).join('.');
-        }
-
-        // Ограничиваем кеш, чтобы не рос бесконечно на динамических URL.
-        if (domainCache.size > 1000) domainCache.clear();
-        domainCache.set(hostname, result);
-        return result;
+        return hostname || 'unknown';
     } catch {
         return 'unknown';
     }
+}
+
+function getRootDomainFromHostname(hostname: string): string {
+    if (!hostname || hostname === 'unknown') return 'unknown';
+    if (domainCache.has(hostname)) return domainCache.get(hostname)!;
+
+    const parts = hostname.split('.');
+    let result: string;
+
+    if (isIpAddress(hostname) || parts.length <= 1) {
+        result = hostname;
+    } else if (parts.length <= 2) {
+        result = hostname;
+    } else {
+        const lastPart = parts[parts.length - 1];
+        const secondLastPart = parts[parts.length - 2];
+
+        result = secondLastPart.length <= 3 && lastPart.length <= 3
+            ? parts.slice(-3).join('.')
+            : parts.slice(-2).join('.');
+    }
+
+    // Ограничиваем кеш, чтобы не рос бесконечно на динамических URL.
+    if (domainCache.size > 1000) domainCache.clear();
+    domainCache.set(hostname, result);
+    return result;
+}
+
+export function getRootDomain(url: string): string {
+    return getRootDomainFromHostname(getHostname(url));
 }

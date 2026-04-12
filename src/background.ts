@@ -1,6 +1,6 @@
 /// <reference types="chrome" />
 
-import { getRootDomain } from './utils/domainParser';
+import { getHostname, getRootDomain } from './utils/domainParser';
 import {
     POPUP_PORT_NAME,
     SUBSCRIBE_TAB_MESSAGE_TYPE,
@@ -13,6 +13,7 @@ import {
 const UPDATE_THROTTLE_MS = 100;
 const STORAGE_WRITE_THROTTLE_MS = 250;
 const SESSION_STATE_KEY = 'tracked-tab-state';
+type DomainViewMode = 'root' | 'all';
 
 type RequestDetails = {
     documentId?: string;
@@ -28,16 +29,24 @@ type RequestWithIpDetails = RequestDetails & {
 };
 
 type PersistedTabState = {
-    domainCounts: Record<string, number>;
+    rootDomainCounts: Record<string, number>;
+    allDomainCounts?: Record<string, number>;
+    rootLocalAddresses?: Record<string, string[]>;
+    allLocalAddresses?: Record<string, string[]>;
+    // Backward compatibility with 1.5.0 session state.
+    domainCounts?: Record<string, number>;
     localAddresses?: Record<string, string[]>;
     topLevelOrigin?: string;
 };
 
 type PersistedSessionState = Record<string, PersistedTabState>;
 
-const tabDomainCounts = new Map<number, Map<string, number>>();
-const tabDomainLocalAddresses = new Map<number, Map<string, Set<string>>>();
-const tabActiveConnections = new Map<number, Map<string, number>>();
+const tabRootDomainCounts = new Map<number, Map<string, number>>();
+const tabAllDomainCounts = new Map<number, Map<string, number>>();
+const tabRootDomainLocalAddresses = new Map<number, Map<string, Set<string>>>();
+const tabAllDomainLocalAddresses = new Map<number, Map<string, Set<string>>>();
+const tabRootActiveConnections = new Map<number, Map<string, number>>();
+const tabAllActiveConnections = new Map<number, Map<string, number>>();
 const tabSubscribers = new Map<number, Set<chrome.runtime.Port>>();
 const documentTabIds = new Map<string, number>();
 const tabDocumentIds = new Map<number, Set<string>>();
@@ -60,12 +69,28 @@ function isSubscribeTabMessage(message: unknown): message is SubscribeTabMessage
     return candidate.type === SUBSCRIBE_TAB_MESSAGE_TYPE && typeof candidate.tabId === 'number';
 }
 
-function buildSnapshot(tabId: number): DomainEntry[] {
-    const domainCounts = tabDomainCounts.get(tabId);
+function getDomainKey(url: string, mode: DomainViewMode): string {
+    return mode === 'all' ? getHostname(url) : getRootDomain(url);
+}
+
+function getDomainCountStore(mode: DomainViewMode): Map<number, Map<string, number>> {
+    return mode === 'all' ? tabAllDomainCounts : tabRootDomainCounts;
+}
+
+function getLocalAddressStore(mode: DomainViewMode): Map<number, Map<string, Set<string>>> {
+    return mode === 'all' ? tabAllDomainLocalAddresses : tabRootDomainLocalAddresses;
+}
+
+function getActiveConnectionStore(mode: DomainViewMode): Map<number, Map<string, number>> {
+    return mode === 'all' ? tabAllActiveConnections : tabRootActiveConnections;
+}
+
+function buildModeSnapshot(tabId: number, mode: DomainViewMode): DomainEntry[] {
+    const domainCounts = getDomainCountStore(mode).get(tabId);
     if (!domainCounts) return [];
 
-    const activeMap = tabActiveConnections.get(tabId);
-    const localAddressMap = tabDomainLocalAddresses.get(tabId);
+    const activeMap = getActiveConnectionStore(mode).get(tabId);
+    const localAddressMap = getLocalAddressStore(mode).get(tabId);
 
     return Array.from(domainCounts.entries()).map(([domain, count]) => ({
         domain,
@@ -281,28 +306,30 @@ function resolveTabId(details: RequestDetails): number {
     return -1;
 }
 
-function getOrCreateTabDomainCounts(tabId: number): Map<string, number> {
-    const existing = tabDomainCounts.get(tabId);
+function getOrCreateTabDomainCounts(tabId: number, mode: DomainViewMode): Map<string, number> {
+    const store = getDomainCountStore(mode);
+    const existing = store.get(tabId);
     if (existing) return existing;
 
     const created = new Map<string, number>();
-    tabDomainCounts.set(tabId, created);
+    store.set(tabId, created);
     return created;
 }
 
-function getOrCreateTabDomainLocalAddresses(tabId: number): Map<string, Set<string>> {
-    const existing = tabDomainLocalAddresses.get(tabId);
+function getOrCreateTabDomainLocalAddresses(tabId: number, mode: DomainViewMode): Map<string, Set<string>> {
+    const store = getLocalAddressStore(mode);
+    const existing = store.get(tabId);
     if (existing) return existing;
 
     const created = new Map<string, Set<string>>();
-    tabDomainLocalAddresses.set(tabId, created);
+    store.set(tabId, created);
     return created;
 }
 
-function recordLocalAddress(tabId: number, domain: string, localAddress: string): void {
+function recordLocalAddress(tabId: number, domain: string, localAddress: string, mode: DomainViewMode): void {
     if (!domain || !localAddress) return;
 
-    const domainLocalAddresses = getOrCreateTabDomainLocalAddresses(tabId);
+    const domainLocalAddresses = getOrCreateTabDomainLocalAddresses(tabId, mode);
     const knownAddresses = domainLocalAddresses.get(domain) ?? new Set<string>();
     const nextAddress = parseStoredLocalAddress(localAddress);
 
@@ -323,19 +350,26 @@ function recordLocalAddress(tabId: number, domain: string, localAddress: string)
 }
 
 function ensureTabDomainFromUrl(tabId: number, url: string, defaultCount = 1): void {
-    const rootDomain = getRootDomain(url);
-    if (rootDomain === 'unknown') return;
+    const rootDomain = getDomainKey(url, 'root');
+    const fullDomain = getDomainKey(url, 'all');
+    if (rootDomain === 'unknown' || fullDomain === 'unknown') return;
 
-    const domainCounts = getOrCreateTabDomainCounts(tabId);
-    if (!domainCounts.has(rootDomain)) {
-        domainCounts.set(rootDomain, defaultCount);
+    const rootDomainCounts = getOrCreateTabDomainCounts(tabId, 'root');
+    if (!rootDomainCounts.has(rootDomain)) {
+        rootDomainCounts.set(rootDomain, defaultCount);
+    }
+
+    const allDomainCounts = getOrCreateTabDomainCounts(tabId, 'all');
+    if (!allDomainCounts.has(fullDomain)) {
+        allDomainCounts.set(fullDomain, defaultCount);
     }
 
     updateOriginTabIndex(tabId, getOrigin(url));
     rememberKnownOrigin(tabId, getOrigin(url));
     const directLocalAddress = getLocalAddressFromUrl(url);
     if (directLocalAddress) {
-        recordLocalAddress(tabId, rootDomain, directLocalAddress);
+        recordLocalAddress(tabId, rootDomain, directLocalAddress, 'root');
+        recordLocalAddress(tabId, fullDomain, directLocalAddress, 'all');
     }
 
     scheduleSnapshot(tabId);
@@ -345,14 +379,30 @@ function ensureTabDomainFromUrl(tabId: number, url: string, defaultCount = 1): v
 function serializeState(): PersistedSessionState {
     const serializedState: PersistedSessionState = {};
 
-    tabDomainCounts.forEach((domainCounts, tabId) => {
-        if (domainCounts.size === 0) return;
+    const tabIds = new Set<number>([
+        ...tabRootDomainCounts.keys(),
+        ...tabAllDomainCounts.keys()
+    ]);
+
+    tabIds.forEach((tabId) => {
+        const rootDomainCounts = tabRootDomainCounts.get(tabId);
+        const allDomainCounts = tabAllDomainCounts.get(tabId);
+        if (!rootDomainCounts?.size && !allDomainCounts?.size) return;
 
         serializedState[String(tabId)] = {
-            domainCounts: Object.fromEntries(domainCounts),
-            localAddresses: tabDomainLocalAddresses.has(tabId)
+            rootDomainCounts: Object.fromEntries(rootDomainCounts ?? new Map<string, number>()),
+            allDomainCounts: allDomainCounts ? Object.fromEntries(allDomainCounts) : undefined,
+            rootLocalAddresses: tabRootDomainLocalAddresses.has(tabId)
                 ? Object.fromEntries(
-                    Array.from(tabDomainLocalAddresses.get(tabId)!.entries()).map(([domain, addresses]) => [
+                    Array.from(tabRootDomainLocalAddresses.get(tabId)!.entries()).map(([domain, addresses]) => [
+                        domain,
+                        Array.from(addresses).sort((left, right) => left.localeCompare(right))
+                    ])
+                )
+                : undefined,
+            allLocalAddresses: tabAllDomainLocalAddresses.has(tabId)
+                ? Object.fromEntries(
+                    Array.from(tabAllDomainLocalAddresses.get(tabId)!.entries()).map(([domain, addresses]) => [
                         domain,
                         Array.from(addresses).sort((left, right) => left.localeCompare(right))
                     ])
@@ -405,29 +455,54 @@ async function restorePersistedState(): Promise<void> {
         const tabId = Number(rawTabId);
         if (!Number.isInteger(tabId) || tabId < 0 || !openTabIds.has(tabId)) return;
 
-        const restoredCounts = new Map<string, number>();
-        Object.entries(persistedState.domainCounts ?? {}).forEach(([domain, count]) => {
+        const restoredRootCounts = new Map<string, number>();
+        Object.entries(persistedState.rootDomainCounts ?? persistedState.domainCounts ?? {}).forEach(([domain, count]) => {
             if (!domain || !Number.isFinite(count) || count <= 0) return;
-            restoredCounts.set(domain, count);
+            restoredRootCounts.set(domain, count);
         });
 
-        if (restoredCounts.size > 0) {
-            tabDomainCounts.set(tabId, restoredCounts);
+        if (restoredRootCounts.size > 0) {
+            tabRootDomainCounts.set(tabId, restoredRootCounts);
         }
 
-        const restoredLocalAddresses = new Map<string, Set<string>>();
-        Object.entries(persistedState.localAddresses ?? {}).forEach(([domain, addresses]) => {
+        const restoredAllCounts = new Map<string, number>();
+        Object.entries(persistedState.allDomainCounts ?? {}).forEach(([domain, count]) => {
+            if (!domain || !Number.isFinite(count) || count <= 0) return;
+            restoredAllCounts.set(domain, count);
+        });
+
+        if (restoredAllCounts.size > 0) {
+            tabAllDomainCounts.set(tabId, restoredAllCounts);
+        }
+
+        const restoredRootLocalAddresses = new Map<string, Set<string>>();
+        Object.entries(persistedState.rootLocalAddresses ?? persistedState.localAddresses ?? {}).forEach(([domain, addresses]) => {
             const normalizedAddresses = (Array.isArray(addresses) ? addresses : [])
                 .map((address) => typeof address === 'string' ? parseStoredLocalAddress(address).host : '')
                 .filter(Boolean);
 
             if (domain && normalizedAddresses.length > 0) {
-                restoredLocalAddresses.set(domain, new Set(normalizedAddresses));
+                restoredRootLocalAddresses.set(domain, new Set(normalizedAddresses));
             }
         });
 
-        if (restoredLocalAddresses.size > 0) {
-            tabDomainLocalAddresses.set(tabId, restoredLocalAddresses);
+        if (restoredRootLocalAddresses.size > 0) {
+            tabRootDomainLocalAddresses.set(tabId, restoredRootLocalAddresses);
+        }
+
+        const restoredAllLocalAddresses = new Map<string, Set<string>>();
+        Object.entries(persistedState.allLocalAddresses ?? {}).forEach(([domain, addresses]) => {
+            const normalizedAddresses = (Array.isArray(addresses) ? addresses : [])
+                .map((address) => typeof address === 'string' ? parseStoredLocalAddress(address).host : '')
+                .filter(Boolean);
+
+            if (domain && normalizedAddresses.length > 0) {
+                restoredAllLocalAddresses.set(domain, new Set(normalizedAddresses));
+            }
+        });
+
+        if (restoredAllLocalAddresses.size > 0) {
+            tabAllDomainLocalAddresses.set(tabId, restoredAllLocalAddresses);
         }
 
         if (typeof persistedState.topLevelOrigin === 'string') {
@@ -447,7 +522,8 @@ function postSnapshot(tabId: number): void {
     const payload: TabDomainsUpdateMessage = {
         type: TAB_DOMAINS_UPDATE_MESSAGE_TYPE,
         tabId,
-        domains: buildSnapshot(tabId)
+        rootDomains: buildModeSnapshot(tabId, 'root'),
+        allDomains: buildModeSnapshot(tabId, 'all')
     };
 
     const stalePorts: chrome.runtime.Port[] = [];
@@ -483,9 +559,12 @@ function clearTabData(tabId: number): void {
         updateTimers.delete(tabId);
     }
 
-    tabDomainCounts.delete(tabId);
-    tabDomainLocalAddresses.delete(tabId);
-    tabActiveConnections.delete(tabId);
+    tabRootDomainCounts.delete(tabId);
+    tabAllDomainCounts.delete(tabId);
+    tabRootDomainLocalAddresses.delete(tabId);
+    tabAllDomainLocalAddresses.delete(tabId);
+    tabRootActiveConnections.delete(tabId);
+    tabAllActiveConnections.delete(tabId);
     clearTabDocumentLinks(tabId);
     clearKnownOrigins(tabId);
     updateOriginTabIndex(tabId, null);
@@ -493,9 +572,12 @@ function clearTabData(tabId: number): void {
 }
 
 function resetTabTracking(tabId: number): void {
-    tabDomainCounts.set(tabId, new Map());
-    tabDomainLocalAddresses.set(tabId, new Map());
-    tabActiveConnections.set(tabId, new Map());
+    tabRootDomainCounts.set(tabId, new Map());
+    tabAllDomainCounts.set(tabId, new Map());
+    tabRootDomainLocalAddresses.set(tabId, new Map());
+    tabAllDomainLocalAddresses.set(tabId, new Map());
+    tabRootActiveConnections.set(tabId, new Map());
+    tabAllActiveConnections.set(tabId, new Map());
     clearTabDocumentLinks(tabId);
     clearKnownOrigins(tabId);
 }
@@ -527,20 +609,28 @@ function addRequest(details: RequestDetails): void {
         details.initiator && details.initiator !== 'null' ? details.initiator : null
     );
 
-    const rootDomain = getRootDomain(details.url);
-    if (rootDomain === 'unknown') {
+    const rootDomain = getDomainKey(details.url, 'root');
+    const fullDomain = getDomainKey(details.url, 'all');
+    if (rootDomain === 'unknown' || fullDomain === 'unknown') {
         if (isMainFrame) {
             scheduleSnapshot(resolvedTabId);
         }
         return;
     }
 
-    const domainCounts = getOrCreateTabDomainCounts(resolvedTabId);
-    domainCounts.set(rootDomain, (domainCounts.get(rootDomain) ?? 0) + 1);
+    const rootDomainCounts = getOrCreateTabDomainCounts(resolvedTabId, 'root');
+    rootDomainCounts.set(rootDomain, (rootDomainCounts.get(rootDomain) ?? 0) + 1);
 
-    const activeConnections = tabActiveConnections.get(resolvedTabId) ?? new Map<string, number>();
-    activeConnections.set(rootDomain, (activeConnections.get(rootDomain) ?? 0) + 1);
-    tabActiveConnections.set(resolvedTabId, activeConnections);
+    const allDomainCounts = getOrCreateTabDomainCounts(resolvedTabId, 'all');
+    allDomainCounts.set(fullDomain, (allDomainCounts.get(fullDomain) ?? 0) + 1);
+
+    const rootActiveConnections = tabRootActiveConnections.get(resolvedTabId) ?? new Map<string, number>();
+    rootActiveConnections.set(rootDomain, (rootActiveConnections.get(rootDomain) ?? 0) + 1);
+    tabRootActiveConnections.set(resolvedTabId, rootActiveConnections);
+
+    const allActiveConnections = tabAllActiveConnections.get(resolvedTabId) ?? new Map<string, number>();
+    allActiveConnections.set(fullDomain, (allActiveConnections.get(fullDomain) ?? 0) + 1);
+    tabAllActiveConnections.set(resolvedTabId, allActiveConnections);
 
     scheduleSnapshot(resolvedTabId);
     schedulePersistState();
@@ -550,20 +640,28 @@ function removeActiveRequest(details: RequestDetails): void {
     const resolvedTabId = resolveTabId(details);
     if (resolvedTabId < 0) return;
 
-    const rootDomain = getRootDomain(details.url);
-    if (rootDomain === 'unknown') return;
+    let hasChanges = false;
 
-    const activeConnections = tabActiveConnections.get(resolvedTabId);
-    if (!activeConnections) return;
+    for (const mode of ['root', 'all'] as DomainViewMode[]) {
+        const domainKey = getDomainKey(details.url, mode);
+        if (domainKey === 'unknown') continue;
 
-    const current = activeConnections.get(rootDomain) ?? 0;
-    if (current > 0) {
+        const activeConnections = getActiveConnectionStore(mode).get(resolvedTabId);
+        if (!activeConnections) continue;
+
+        const current = activeConnections.get(domainKey) ?? 0;
+        if (current <= 0) continue;
+
         if (current === 1) {
-            activeConnections.delete(rootDomain);
+            activeConnections.delete(domainKey);
         } else {
-            activeConnections.set(rootDomain, current - 1);
+            activeConnections.set(domainKey, current - 1);
         }
 
+        hasChanges = true;
+    }
+
+    if (hasChanges) {
         scheduleSnapshot(resolvedTabId);
     }
 }
@@ -578,13 +676,15 @@ function trackLocalAddress(details: RequestWithIpDetails): void {
         details.initiator && details.initiator !== 'null' ? details.initiator : null
     );
 
-    const rootDomain = getRootDomain(details.url);
-    if (rootDomain === 'unknown') return;
-
     const localAddress = getLocalAddressFromUrl(details.url) ?? getLocalAddressFromIp(details.ip);
     if (!localAddress) return;
 
-    recordLocalAddress(resolvedTabId, rootDomain, localAddress);
+    const rootDomain = getDomainKey(details.url, 'root');
+    const fullDomain = getDomainKey(details.url, 'all');
+    if (rootDomain === 'unknown' || fullDomain === 'unknown') return;
+
+    recordLocalAddress(resolvedTabId, rootDomain, localAddress, 'root');
+    recordLocalAddress(resolvedTabId, fullDomain, localAddress, 'all');
 }
 
 async function primeTabFromCurrentUrl(tabId: number): Promise<void> {

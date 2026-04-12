@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+    type DomainViewMode,
     POPUP_PORT_NAME,
     SUBSCRIBE_TAB_MESSAGE_TYPE,
     TAB_DOMAINS_UPDATE_MESSAGE_TYPE,
@@ -8,11 +9,12 @@ import {
     type TabDomainsUpdateMessage
 } from './shared/messages';
 
-const COPY_DEFAULT_LABEL = 'Copy all domains';
+const COPY_DEFAULT_LABEL = 'Copy all';
 const COPY_SUCCESS_LABEL = 'Copied!';
 const COPY_ERROR_LABEL = 'Copy failed';
 const COPY_RESET_TIMEOUT_MS = 2000;
 const LOADING_FALLBACK_MS = 1200;
+const DOMAIN_VIEW_MODE_STORAGE_KEY = 'domain-view-mode';
 
 function getTrackableTabUrl(tab: chrome.tabs.Tab | undefined): string | null {
     const candidateUrl = tab?.pendingUrl ?? tab?.url;
@@ -25,6 +27,8 @@ type DomainState = {
     active?: boolean;
     localAddresses?: string[];
 };
+
+type DomainMapsState = Record<DomainViewMode, Map<string, DomainState>>;
 
 function arraysAreEqual(left: string[] | undefined, right: string[] | undefined): boolean {
     if (!left?.length && !right?.length) return true;
@@ -47,11 +51,25 @@ function mapsAreEqual(left: Map<string, DomainState>, right: Map<string, DomainS
     return true;
 }
 
+function createEmptyDomainMaps(): DomainMapsState {
+    return {
+        root: new Map<string, DomainState>(),
+        all: new Map<string, DomainState>()
+    };
+}
+
+function domainMapsAreEqual(left: DomainMapsState, right: DomainMapsState): boolean {
+    return mapsAreEqual(left.root, right.root) && mapsAreEqual(left.all, right.all);
+}
+
 function App() {
-    const [domainMap, setDomainMap] = useState<Map<string, DomainState>>(new Map());
+    const [domainMaps, setDomainMaps] = useState<DomainMapsState>(() => createEmptyDomainMaps());
     const [loading, setLoading] = useState(true);
     const [copyStatus, setCopyStatus] = useState(COPY_DEFAULT_LABEL);
     const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
+    const [domainViewMode, setDomainViewMode] = useState<DomainViewMode>(() =>
+        localStorage.getItem(DOMAIN_VIEW_MODE_STORAGE_KEY) === 'all' ? 'all' : 'root'
+    );
     const copyResetTimerRef = useRef<number | null>(null);
 
     useEffect(() => {
@@ -68,8 +86,14 @@ function App() {
         localStorage.setItem('theme', newMode ? 'dark' : 'light');
     };
 
+    const toggleDomainViewMode = () => {
+        const nextMode: DomainViewMode = domainViewMode === 'root' ? 'all' : 'root';
+        setDomainViewMode(nextMode);
+        localStorage.setItem(DOMAIN_VIEW_MODE_STORAGE_KEY, nextMode);
+    };
+
     const domains = useMemo(() => {
-        return Array.from(domainMap.entries())
+        return Array.from(domainMaps[domainViewMode].entries())
             .sort((left, right) => {
                 const countDiff = right[1].count - left[1].count;
                 if (countDiff !== 0) return countDiff;
@@ -81,9 +105,9 @@ function App() {
                 active: val.active,
                 localAddresses: val.localAddresses
             }));
-    }, [domainMap]);
+    }, [domainMaps, domainViewMode]);
 
-    const applyDomainSnapshot = (domainEntries: DomainEntry[]) => {
+    const buildDomainMap = useCallback((domainEntries: DomainEntry[]) => {
         const nextMap = new Map<string, DomainState>();
 
         domainEntries.forEach((entry) => {
@@ -101,9 +125,18 @@ function App() {
             });
         });
 
-        setDomainMap((currentMap) => mapsAreEqual(currentMap, nextMap) ? currentMap : nextMap);
+        return nextMap;
+    }, []);
+
+    const applyDomainSnapshot = useCallback((rootEntries: DomainEntry[], allEntries: DomainEntry[]) => {
+        const nextMaps: DomainMapsState = {
+            root: buildDomainMap(rootEntries),
+            all: buildDomainMap(allEntries)
+        };
+
+        setDomainMaps((currentMaps) => domainMapsAreEqual(currentMaps, nextMaps) ? currentMaps : nextMaps);
         setLoading(false);
-    };
+    }, [buildDomainMap]);
 
     useEffect(() => {
         let port: chrome.runtime.Port | null = null;
@@ -133,7 +166,7 @@ function App() {
         };
 
         const resetDomains = () => {
-            setDomainMap(new Map());
+            setDomainMaps(createEmptyDomainMaps());
         };
 
         const subscribeToTab = (tabId: number) => {
@@ -148,8 +181,9 @@ function App() {
                 if (message.type !== TAB_DOMAINS_UPDATE_MESSAGE_TYPE) return;
                 if (message.tabId !== tabId) return;
 
-                const domains = Array.isArray(message.domains) ? message.domains : [];
-                applyDomainSnapshot(domains);
+                const rootDomains = Array.isArray(message.rootDomains) ? message.rootDomains : [];
+                const allDomains = Array.isArray(message.allDomains) ? message.allDomains : [];
+                applyDomainSnapshot(rootDomains, allDomains);
             });
 
             port.onDisconnect.addListener(() => {
@@ -239,7 +273,7 @@ function App() {
             chrome.tabs.onActivated.removeListener(handleTabActivated);
             chrome.tabs.onUpdated.removeListener(handleTabUpdate);
         };
-    }, []);
+    }, [applyDomainSnapshot]);
 
     useEffect(() => {
         return () => {
@@ -275,7 +309,7 @@ function App() {
     const handleReload = () => {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
             if (tabs[0]?.id) {
-                setDomainMap(new Map());
+                setDomainMaps(createEmptyDomainMaps());
                 setLoading(true);
                 chrome.tabs.reload(tabs[0].id);
             }
@@ -374,7 +408,7 @@ function App() {
                 </button>
                 <button
                     onClick={handleCopy}
-                    className={`flex-1 py-2 px-4 rounded-lg text-sm font-semibold 
+                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-semibold whitespace-nowrap
                 ${copyStatus === COPY_SUCCESS_LABEL
                             ? "bg-green-500 text-white"
                             : "bg-indigo-600 dark:bg-indigo-700 text-white hover:bg-indigo-700 dark:hover:bg-indigo-600 active:scale-95"
@@ -383,16 +417,22 @@ function App() {
                     {copyStatus}
                 </button>
                 <button
+                    onClick={toggleDomainViewMode}
+                    className="min-w-[58px] py-2 px-3 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg text-sm font-bold tracking-wide uppercase flex-shrink-0"
+                >
+                    {domainViewMode === 'root' ? 'ROOT' : 'ALL'}
+                </button>
+                <button
                     onClick={toggleDarkMode}
                     className="p-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-lg flex-shrink-0"
                 >
                     {isDarkMode ? (
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-yellow-400">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M3 12h2.25m.386-6.364l1.591 1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" />
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-indigo-300">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" />
                         </svg>
                     ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-indigo-600">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" />
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-yellow-400">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M3 12h2.25m.386-6.364l1.591 1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" />
                         </svg>
                     )}
                 </button>
